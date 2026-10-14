@@ -219,8 +219,10 @@ void speed_pid_task(void)
     if (!pid_running) return;
     l_out = speed_pid_calculate(&pid_speed_left, encoder_left.speed, &left);
     r_out = speed_pid_calculate(&pid_speed_right, encoder_right.speed, &right);
+#if DEAD_COMP_ENABLE
     l_out = duty_comp(l_out, (float)DEAD_LEFT);
     r_out = duty_comp(r_out, (float)DEAD_RIGHT);
+#endif
     /* 屏幕显示补偿后的实际 PWM 指令。 */
     pid_speed_left.out = l_out;
     pid_speed_right.out = r_out;

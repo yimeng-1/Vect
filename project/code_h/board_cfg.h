@@ -6,6 +6,7 @@
 /* DRV8701E PH/EN 模式：EN 接 PWM，PH 控制方向。 */
 #define MOTOR_PWM_FREQ       (17000UL)       /* PWM 频率 */
 #define MOTOR_DUTY_MAX       (PWM_DUTY_MAX)  /* 最大占空比 */
+#define DEAD_COMP_ENABLE     (0U)            /* 0：关闭死区补偿，1：开启 */
 #define DEAD_LEFT            (780)           /* 左电机实测死区，用于速度环补偿 */
 #define DEAD_RIGHT           (850)           /* 右电机实测死区，用于速度环补偿 */
 #define MOTOR_LEFT_DIR       (IO_P51)        /* 左电机 PH：方向 */
