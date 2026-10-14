@@ -1,0 +1,14 @@
+# Keil 编译输出：保留最终 HEX，忽略中间文件
+project/mdk/out_file/*
+!project/mdk/out_file/SEEKFREE.hex
+
+# 编译日志
+project/mdk/*.log
+
+# Keil 用户本机配置
+project/mdk/*.uvopt
+project/mdk/*.uvgui.*
+
+# 临时文件
+*.bak
+*.tmp
