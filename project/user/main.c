@@ -36,6 +36,8 @@
 #include "scheduler.h"
 #include "control.h"
 #include "screen.h"
+#include "key.h"
+#include "board_cfg.h"
 
 
 void main(void)
@@ -44,7 +46,11 @@ void main(void)
     debug_init();
     ctrl_init();
     screen_init();
-    scheduler_init();                       		// 调试串口信息初始化
+    scheduler_init();                       /* 调度表初始化 */
+    key_init();
+    /* 外设和调度表准备完成后再启动定时器。 */
+    pit_ms_init(SCHEDULER_PIT, 1, scheduler_tick_isr);
+    pit_ms_init(CONTROL_PIT, TASK_MS, control_tick_isr);
 
     // 此处编写用户代码 例如外设初始化代码等
 

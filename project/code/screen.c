@@ -194,8 +194,6 @@ void screen_init(void)
 void screen_task(void)
 {
     uint16 log_color;
-    float yaw_deg;
-    char yaw_text[16];
     char left_text[16];
     char right_text[16];
     char error_text[16];
@@ -206,29 +204,45 @@ void screen_task(void)
     char right_target_text[16];
     char left_out_text[16];
     char right_out_text[16];
+    char *stage_text;
 
     if (!screen_ready)
     {
         return;
     }
 
-    yaw_deg = yaw_rate / RAD_PER_DEG;
-    screen_fixed(yaw_deg, yaw_text);
     screen_fixed(encoder_left.speed, left_text);
     screen_fixed(encoder_right.speed, right_text);
-#if TRACK_TEST_ENABLE
-    screen_fixed(TRACK_TEST_ERROR, error_text);
-#else
-    screen_fixed(track_error(), error_text);
-#endif
-    screen_fixed(yaw_ctrl.target_yaw_rate / RAD_PER_DEG, steer_text);
-    screen_fixed(yaw_rate / RAD_PER_DEG, yaw_in_text);
+    screen_fixed(steer_in, error_text);
+    screen_fixed(steer_out, steer_text);
+    screen_fixed(yaw_rate, yaw_in_text);
     screen_fixed(yaw_ctrl.diff_speed, yaw_out_text);
     screen_fixed(pid_speed_left.target, left_target_text);
     screen_fixed(pid_speed_right.target, right_target_text);
     screen_int(pid_speed_left.out, left_out_text);
     screen_int(pid_speed_right.out, right_out_text);
-    ips200pro_label_printf(screen_sub, "TRK I %s  O %s", error_text, steer_text);
+    if (steer_stage_id == 2U)
+    {
+        stage_text = "TURN";
+    }
+    else if (!track.valid)
+    {
+        stage_text = "WAIT";
+    }
+    else if (steer_stage_id == 0U)
+    {
+        stage_text = "STR";
+    }
+    else if (steer_stage_id == 1U)
+    {
+        stage_text = "CUR";
+    }
+    else
+    {
+        stage_text = "TURN";
+    }
+    ips200pro_label_printf(screen_sub, "TRK %s I%s O%s",
+                           stage_text, error_text, steer_text);
     ips200pro_label_printf(screen_yaw_text, "YAW I %s\nYAW O %s",
                            yaw_in_text, yaw_out_text);
     ips200pro_label_printf(screen_encoder_text,
@@ -253,19 +267,20 @@ void screen_task(void)
                                "> IMU660RC     OK\r\n"
                                "> ERROR 04     CONTROL");
     }
+    else if (!track.valid)
+    {
+        log_color = UI_TERM_WARN;
+        ips200pro_label_printf(screen_log,
+                               "> MOTOR        %s\r\n"
+                               "> TRACK        NO LINE",
+                               speed_enable ? "RUNNING" : "STOPPED");
+    }
     else if (!speed_enable)
     {
         log_color = UI_TERM_WARN;
         ips200pro_label_printf(screen_log,
                                "> CONTROL      READY\r\n"
                                "> MOTOR WAIT   B3");
-    }
-    else if (!track.valid)
-    {
-        log_color = UI_TERM_WARN;
-        ips200pro_label_printf(screen_log,
-                               "> MOTOR        RUNNING\r\n"
-                               "> WARN 02      TRACK WAIT");
     }
     else
     {

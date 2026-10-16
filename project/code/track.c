@@ -1,5 +1,6 @@
 #include "track.h"
 #include "board_cfg.h"
+#include "control.h"
 
 track_t track;
 
@@ -11,9 +12,7 @@ void track_init(void)
     gpio_init(TRACK_S1, GPO, GPIO_LOW, GPO_PUSH_PULL);
     gpio_init(TRACK_S2, GPO, GPIO_LOW, GPO_PUSH_PULL);
     gpio_init(TRACK_S3, GPO, GPIO_LOW, GPO_PUSH_PULL);
-#if !DEBUG_WIRELESS
     adc_init(TRACK_AS, ADC_12BIT);
-#endif
 
     track.adc = 0;
     for (i = 0; i < TRACK_N; i++)
@@ -31,23 +30,22 @@ void track_sample(void)
     uint8 j;
     uint16 raw;
     uint16 signal;
+    uint16 low;
+    uint16 high;
     uint32 adc_sum;
     uint32 raw_sum;
     uint32 gray_sum;
     float pos;
 
-#if DEBUG_WIRELESS
-    /* wireless debug disables gray ADC to avoid P04/UART5 RX conflict */
-    return;
-#endif
-
     raw_sum = 0;
     gray_sum = 0;
     pos = 0.0f;
+    low = TRACK_LEVEL_MAX;
+    high = 0;
 
-    for (i = 0; i < TRACK_N; i++)
+    for (i = TRACK_FIRST; i <= TRACK_LAST; i++)
     {
-        /* S3~S0 按高位到低位组成通道号，数组下标直接对应 D0~D15。 */
+        /* D0～D15 全部参与采样和循迹。 */
         gpio_set_level(TRACK_S3, (i >> 3) & 0x01);
         gpio_set_level(TRACK_S2, (i >> 2) & 0x01);
         gpio_set_level(TRACK_S1, (i >> 1) & 0x01);
@@ -67,28 +65,33 @@ void track_sample(void)
 
         raw = (uint16)((adc_sum + 1U) / 2U);
         track.raw[i] = raw;
-        track.gray[i] = (uint8)(((uint32)raw * 100U + 2047U) / 4095U);
+        track.gray[i] = (uint16)(((uint32)raw * TRACK_LEVEL_MAX + 2047U) / 4095U);
         track.adc = raw;
 
         if (TRACK_INV)
         {
             raw = 4095U - raw;
-            signal = 100U - track.gray[i];
+            signal = TRACK_LEVEL_MAX - track.gray[i];
         }
         else
         {
             signal = track.gray[i];
         }
+        if (signal < low) low = signal;
+        if (signal > high) high = signal;
 
         raw_sum += raw;
         gray_sum += signal;
-        pos += (float)signal * ((float)i - 7.5f);
+        pos += (float)signal * ((float)i - TRACK_CENTER);
     }
 
-    track.valid = (raw_sum >= TRACK_SUM_MIN && gray_sum > 0U) ? 1 : 0;
+    /* 均匀底色不作为有效线；此标志仅用于误差有效性判断，不触发停机。 */
+    track.valid = (raw_sum >= TRACK_SUM_MIN && gray_sum > 0U
+                   && high - low >= TRACK_DIFF_MIN) ? 1 : 0;
     if (track.valid)
     {
-        track.error = pos * TRACK_GAIN / ((float)gray_sum * 7.5f);
+        /* 将通道偏移映射到 ±TRACK_ERR_MAX 的误差量程。 */
+        track.error = pos * TRACK_ERR_MAX / ((float)gray_sum * TRACK_SPAN);
     }
     else
     {
@@ -99,4 +102,11 @@ void track_sample(void)
 float track_error(void)
 {
     return track.valid ? track.error : 0.0f;
+}
+
+/* 灰度采样和寻迹外环放在灰度模块内。 */
+void track_task(void)
+{
+    track_sample();
+    steer_task();
 }

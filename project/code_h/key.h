@@ -26,6 +26,7 @@ extern uint8 key_double;
 
 void key_init(void);
 void key_task(void);
+void key_proc(void);
 void key_clear(uint8 mask);
 
 #endif

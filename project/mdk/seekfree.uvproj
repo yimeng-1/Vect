@@ -855,6 +855,11 @@
               <FilePath>..\code\control.c</FilePath>
             </File>
             <File>
+              <FileName>imu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\code\imu.c</FilePath>
+            </File>
+            <File>
               <FileName>screen.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\code\screen.c</FilePath>
@@ -898,6 +903,11 @@
               <FileName>control.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\code_h\control.h</FilePath>
+            </File>
+            <File>
+              <FileName>imu.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\code_h\imu.h</FilePath>
             </File>
             <File>
               <FileName>screen.h</FileName>

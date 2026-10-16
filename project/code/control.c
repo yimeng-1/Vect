@@ -3,14 +3,16 @@
 #include "track.h"
 #include "encoder.h"
 #include "motor.h"
+#include "imu.h"
+#include "scheduler.h"
 
 /* 循迹外环 -> IMU 角速度中环 -> 编码器速度环。 */
-float yaw_rate = 0.0f;
-uint8 imu_ok = 0;
 PID_T pid_speed_left;
 PID_T pid_speed_right;
 PID_T pid_steer;
 PID_T pid_yaw;
+float steer_in = 0.0f;
+float steer_out = 0.0f;
 SpeedPid_t left;
 SpeedPid_t right;
 YawParam_t yaw_param;
@@ -18,6 +20,42 @@ YawCtrl_t yaw_ctrl;
 uint8 pid_running = 0;
 uint8 steer_running = 0;
 volatile uint8 speed_enable = 0;
+
+typedef struct
+{
+    float kp;      /* 寻迹环比例系数 */
+    float ki;      /* 寻迹环积分系数 */
+    float kd;      /* 寻迹环微分系数 */
+    float speed;   /* 本阶段基础速度，cm/s */
+    float out_max; /* 本阶段目标角速度限幅，deg/s */
+} SteerStage_t;
+
+typedef struct
+{
+    SteerStage_t straight; /* 误差较小，保持高速直行 */
+    SteerStage_t curve;    /* 误差中等，降低速度并增强纠偏 */
+    SteerStage_t turn;     /* 误差很大，按直角弯处理 */
+    uint16 turn_ms;        /* 直角弯转向目标保持时间，ms */
+} SteerPlan_t;
+
+/* 误差分段策略：直道、普通弯道、直角弯各用一套参数。 */
+SteerPlan_t steer_plan = {
+    {4.2f, 0.0f, 2.8f, 200.0f, 650.0f}, /* |误差| <= 30 */
+    {4.2f, 0.0f, 2.8f, 200.0f, 650.0f},     /* 普通弯道 */
+    {4.2f, 0.0f, 2.8f, 200.0f, 650.0f},    /* |误差| >= 200 */
+    200                                  /* 直角弯保持时间，ms */
+};
+uint8 steer_stage_id = 0;
+
+typedef struct
+{
+    uint32 start;  /* 开始转弯的毫秒时刻 */
+    float target;  /* 触发时的目标角速度，保持方向及大小 */
+    uint8 active;  /* 正在保持转向 */
+    uint8 ready;   /* 回到直道后允许再次触发，避免同一弯反复锁定 */
+} Turn_t;
+
+Turn_t turn;
 
 float pid_constrain(float value, float low, float high)
 {
@@ -106,9 +144,9 @@ float speed_pid_calculate(PID_T *pid, float current, SpeedPid_t *cfg)
 void pid_init_all(void)
 {                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
     left.kf = 6.0f;
-    left.kp = 6.2f;
-    left.ki = 1.0f;
-    left.kd = 0.0f;
+    left.kp = 6.5f;
+    left.ki = 0.0f;
+    left.kd = 1.0f;
     left.i_max = 1500.0f;
     left.err_max = 2000.0f;
     left.d_hz = 10.0f;
@@ -118,9 +156,9 @@ void pid_init_all(void)
 
     /* 左右轮参数独立，便于分别补偿电机和机械差异。 */
     right.kf = 6.0f;
-    right.kp = 6.2f;
-    right.ki = 1.0f;
-    right.kd = 0.0f;
+    right.kp = 6.5f;
+    right.ki = 0.0f;
+    right.kd = 1.0f;
     right.i_max = 1500.0f;
     right.err_max = 2000.0f;
     right.d_hz = 10.0f;
@@ -136,10 +174,10 @@ void pid_init_all(void)
 /* 角速度环参数：与上面的速度环参数集中放置，便于调参。 */
 void yaw_angle_init(void)
 {
-    yaw_param.kp = 20.8f;
+    yaw_param.kp = 2.75f;
     yaw_param.ki = 0.0f;
-    yaw_param.kd = 0.0f;
-    yaw_param.out_max = 280.0f;
+    yaw_param.kd = 1.6f;
+    yaw_param.out_max = 800.0f;
     yaw_param.filter_alpha = 0.95f;
     pid_init(&pid_yaw, yaw_param.kp, yaw_param.ki, yaw_param.kd,
              0.0f, yaw_param.out_max);
@@ -152,7 +190,11 @@ void yaw_angle_init(void)
 /* 寻迹环参数：与速度环、角速度环参数集中放置。 */
 void steer_init(void)
 {
-    pid_init(&pid_steer, 40.0f, 0.0f, 0.0f, 0.0f, 280.0f);
+    pid_init(&pid_steer, steer_plan.straight.kp, steer_plan.straight.ki,
+             steer_plan.straight.kd, 0.0f, steer_plan.straight.out_max);
+    steer_stage_id = 0;
+    turn.active = 0;
+    turn.ready = 1;
     steer_running = 1;
 }
 
@@ -166,11 +208,12 @@ void speed_start(void)
 {
     bit irq_state;
 
-    if (!imu_ok || !pid_running || !steer_running) return;
+    if (!imu_ok || !pid_running) return;
+    if (!steer_running) return;
     irq_state = EA;
     EA = 0;
     /* 启动先直行，下次灰度采样后由寻迹环更新目标角速度。 */
-    yaw_angle_set(0.0f, BASE_SPEED, yaw_param.out_max);
+    yaw_angle_set(0.0f, steer_plan.straight.speed, yaw_param.out_max);
     speed_enable = 1;
     EA = irq_state;
 }
@@ -182,6 +225,8 @@ void speed_stop(void)
     irq_state = EA;
     EA = 0;
     speed_enable = 0;
+    turn.active = 0;
+    turn.ready = 1;
     yaw_ctrl.running = 0;
     yaw_ctrl.target_yaw_rate = 0.0f;
     yaw_ctrl.base_speed = 0.0f;
@@ -197,21 +242,6 @@ void speed_stop(void)
     EA = irq_state;
 }
 
-/* 非零控制量补上电机死区，零输出仍保持停机。 */
-float duty_comp(float duty, float deadzone)
-{
-    if (duty > 0.0f)
-    {
-        duty += deadzone;
-    }
-    else if (duty < 0.0f)
-    {
-        duty -= deadzone;
-    }
-    return pid_constrain(duty, -(float)MOTOR_DUTY_MAX,
-                         (float)MOTOR_DUTY_MAX);
-}
-
 void speed_pid_task(void)
 {
     float l_out;
@@ -219,42 +249,10 @@ void speed_pid_task(void)
     if (!pid_running) return;
     l_out = speed_pid_calculate(&pid_speed_left, encoder_left.speed, &left);
     r_out = speed_pid_calculate(&pid_speed_right, encoder_right.speed, &right);
-#if DEAD_COMP_ENABLE
-    l_out = duty_comp(l_out, (float)DEAD_LEFT);
-    r_out = duty_comp(r_out, (float)DEAD_RIGHT);
-#endif
-    /* 屏幕显示补偿后的实际 PWM 指令。 */
+    /* 屏幕显示最终下发的 PWM 指令。 */
     pid_speed_left.out = l_out;
     pid_speed_right.out = r_out;
     motor_set((int16)l_out, (int16)r_out);
-}
-
-void pid_wave_task(void)
-{
-    bit irq_state;
-    float target;
-    float l_speed;
-    float r_speed;
-    char target_text[16] = {0};
-    char left_text[16] = {0};
-    char right_text[16] = {0};
-    char line[64];
-    uint16 len;
-
-    irq_state = EA;
-    EA = 0;
-    target = pid_speed_left.target;
-    l_speed = encoder_left.speed;
-    r_speed = encoder_right.speed;
-    EA = irq_state;
-
-    func_float_to_str(target_text, target, 2);
-    func_float_to_str(left_text, l_speed, 2);
-    func_float_to_str(right_text, r_speed, 2);
-    /* USB 单窗口曲线：左轮目标、左反馈、右反馈，单位 cm/s。 */
-    sprintf(line, "{PID}%s,%s,%s\n", target_text, left_text, right_text);
-    len = (uint16)strlen(line);
-    debug_send_buffer((const uint8 *)line, len);
 }
 
 void yaw_angle_set(float target_yaw_rate, float base_speed, float out_max)
@@ -276,7 +274,9 @@ void yaw_angle_task(void)
     if (!speed_enable || !yaw_ctrl.running) return;
     pid_set_limit(&pid_yaw, yaw_ctrl.out_max);
     pid_set_target(&pid_yaw, yaw_ctrl.target_yaw_rate);
+    /* 位置式角速度环：目标角速度减 IMU 实际角速度。 */
     raw = pid_calculate_positional(&pid_yaw, yaw_rate);
+    raw = pid_constrain(raw, -yaw_ctrl.out_max, yaw_ctrl.out_max);
     yaw_ctrl.diff_speed = raw * yaw_param.filter_alpha
                         + yaw_ctrl.diff_speed * (1.0f - yaw_param.filter_alpha);
     yaw_ctrl.diff_speed = pid_constrain(yaw_ctrl.diff_speed,
@@ -285,26 +285,105 @@ void yaw_angle_task(void)
               yaw_ctrl.base_speed - yaw_ctrl.diff_speed);
 }
 
+/* 根据误差选择当前链式控制阶段，返回值对应 steer_plan 的阶段。 */
+uint8 steer_stage_get(float error)
+{
+    float a;
+
+    a = error < 0.0f ? -error : error;
+    if (a <= 30.0f) /* 直道：误差小，保持基础速度 */
+    {
+        return 0;
+    }
+    if (a >=200.0f ) /* 大误差：进入直角弯阶段 */
+    {
+        return 2;
+    }
+    return 1;
+}
+
 void steer_task(void)
 {
     float target;
-    if (!speed_enable || !steer_running) return;
-#if TRACK_TEST_ENABLE
-    /* 三级串级测试：固定给寻迹环一个误差，不使用实际灰度误差。 */
-    target = STEER_YAW_RATE_SIGN * pid_calculate_positional(&pid_steer,
-                                                             -TRACK_TEST_ERROR);
-#else
+    SteerStage_t *stage;
+    uint8 stage_id;
+    uint32 now;
+    bit irq_state;
+
+    if (!steer_running) return;
+    /* 32 位计数由中断更新，读取时保留原中断状态。 */
+    irq_state = EA;
+    EA = 0;
+    now = scheduler_tick;
+    EA = irq_state;
+    steer_in = track_error();
+    if (turn.active)
+    {
+        if (speed_enable && (uint32)(now - turn.start) < steer_plan.turn_ms)
+        {
+            steer_out = turn.target;
+            yaw_angle_set(steer_out, steer_plan.turn.speed, steer_plan.turn.out_max);
+            return;
+        }
+        turn.active = 0;
+        /* 恢复实时循迹时对齐历史误差，避免保持期间的误差跳变产生微分冲击。 */
+        pid_steer.integral = 0.0f;
+        pid_steer.error = steer_in;
+        pid_steer.last_error = steer_in;
+    }
     if (!track.valid)
     {
-        yaw_angle_set(0.0f, BASE_SPEED, yaw_param.out_max);
+        steer_stage_id = 0;
+        steer_in = 0.0f;
+        steer_out = 0.0f;
+        if (speed_enable)
+        {
+            /* 无有效灰度时按直道速度继续，目标角速度归零。 */
+            yaw_angle_set(0.0f, steer_plan.straight.speed, yaw_param.out_max);
+        }
         return;
     }
+    stage_id = steer_stage_get(steer_in);
+    if (stage_id == 0U) turn.ready = 1;
+    if (stage_id == 0)
+    {
+        /* 结构体字段明确对应参考工程的 normal/straight 策略。 */
+        stage = &steer_plan.straight;
+    }
+    else if (stage_id == 1)
+    {
+        stage = &steer_plan.curve;
+    }
+    else
+    {
+        stage = &steer_plan.turn;
+    }
+    if (stage_id != steer_stage_id)
+    {
+        steer_stage_id = stage_id;
+        /* 不让上一阶段的积分和历史误差带入新阶段。 */
+        pid_steer.integral = 0.0f;
+        pid_steer.last_error = pid_steer.error;
+    }
+    pid_steer.kp = stage->kp;
+    pid_steer.ki = stage->ki;
+    pid_steer.kd = stage->kd;
+    pid_steer.limit = stage->out_max;
     target = STEER_YAW_RATE_SIGN * pid_calculate_positional(&pid_steer,
-                                                             -track_error());
-#endif
-    /* 寻迹输出按 deg/s 计算，角速度环输入统一使用 rad/s。 */
-    target = pid_constrain(target, -280.0f, 280.0f) * RAD_PER_DEG;
-    yaw_angle_set(target, BASE_SPEED, yaw_param.out_max);
+                                                             -steer_in);
+    /* 寻迹环和角速度环统一使用 deg/s。 */
+    steer_out = pid_constrain(target, -stage->out_max, stage->out_max);
+    if (speed_enable)
+    {
+        if (stage_id == 2U && turn.ready && steer_plan.turn_ms > 0U)
+        {
+            turn.start = now;
+            turn.target = steer_out;
+            turn.active = 1;
+            turn.ready = 0;
+        }
+        yaw_angle_set(steer_out, stage->speed, stage->out_max);
+    }
 }
 
 void ctrl_init(void)
@@ -312,11 +391,7 @@ void ctrl_init(void)
     motor_init();
     encoder_init();
     track_init();
-    imu_ok = 1;
-    if (imu660rc_init(IMU660RC_QUARTERNION_DISABLE))
-    {
-        imu_ok = 0;
-    }
+    imu_init();
     pid_init_all();
     yaw_angle_init();
     steer_init();
@@ -326,17 +401,17 @@ void ctrl_init(void)
 void sensor_task(void)
 {
     encoder_sample();
-    imu660rc_get_gyro();
-    yaw_rate = IMU_YAW_RATE_SIGN * imu660rc_gyro_transition(imu660rc_gyro_z)
-             * RAD_PER_DEG;
+    imu_task();
 }
 
-void track_task(void)
+void control_tick_isr(void)
 {
-    track_sample();
-    /* 主循环先采样再计算外环，目标角速度原子交给定时器内环。 */
-    steer_task();
+    /* 先更新反馈，再运行角速度环和速度环。 */
+    sensor_task();
+    yaw_task();
+    speed_task();
 }
+
 void yaw_task(void)   { yaw_angle_task(); }
 void speed_task(void)
 {

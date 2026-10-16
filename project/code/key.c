@@ -1,5 +1,6 @@
 #include "key.h"
 #include "board_cfg.h"
+#include "control.h"
 
 #define KEY_COUNT           (3U)  /* 按键数量：B1、B2、B3 */
 #define KEY_IDLE            (0U)  /* 等待第一次按下 */
@@ -158,4 +159,22 @@ void key_clear(uint8 mask)
     key_short &= (uint8)~mask;
     key_long &= (uint8)~mask;
     key_double &= (uint8)~mask;
+}
+
+/* 按键扫描和启动/停止动作放在按键模块内。 */
+void key_proc(void)
+{
+    key_task();
+    if (key_down & KEY_B3)
+    {
+        key_down &= (uint8)~KEY_B3;
+        if (speed_enable)
+        {
+            speed_stop();
+        }
+        else
+        {
+            speed_start();
+        }
+    }
 }

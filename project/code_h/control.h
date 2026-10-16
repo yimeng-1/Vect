@@ -2,6 +2,7 @@
 #define APP_CONTROL_H
 
 #include "zf_common_headfile.h"
+#include "imu.h"
 
 /* 通用 PID 状态。 */
 typedef struct
@@ -64,8 +65,9 @@ extern SpeedPid_t left;
 extern SpeedPid_t right;
 extern YawParam_t yaw_param;
 extern YawCtrl_t yaw_ctrl;
-extern float yaw_rate;
-extern uint8 imu_ok;
+extern float steer_in;
+extern float steer_out;
+extern uint8 steer_stage_id;
 extern uint8 pid_running;
 extern uint8 steer_running;
 extern volatile uint8 speed_enable;
@@ -76,7 +78,6 @@ void speed_set(float l, float r);
 void speed_start(void);
 void speed_stop(void);
 void speed_pid_task(void);
-void pid_wave_task(void);
 void steer_init(void);
 void steer_task(void);
 void yaw_angle_init(void);
@@ -84,7 +85,7 @@ void yaw_angle_set(float target_yaw_rate, float base_speed, float out_max);
 void yaw_angle_task(void);
 
 void sensor_task(void);
-void track_task(void);
+void control_tick_isr(void);
 void yaw_task(void);
 void speed_task(void);
 
